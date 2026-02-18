@@ -17,6 +17,9 @@ pub enum InstallerError {
     #[error("This installer must be run as root (sudo)")]
     NotRoot,
 
+    #[error("BIOS/Legacy mode is not supported — this installer requires UEFI")]
+    BiosNotSupported,
+
     #[error("Prompt error: {0}")]
     Prompt(#[from] dialoguer::Error),
 }

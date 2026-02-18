@@ -1,5 +1,5 @@
 /// Holds all user-selected installation parameters collected throughout the process.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub efi_partition: String,
     pub swap_partition: Option<String>,

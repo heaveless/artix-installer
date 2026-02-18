@@ -16,8 +16,9 @@ pub fn run(config: &Config) -> Result<(), InstallerError> {
         &format!("{} mounted at /mnt.", config.root_partition),
     )?;
 
-    // 2. Swap (optional)
+    // 2. Swap (optional) — deactivate first in case it's already active (resume).
     if let Some(ref swap) = config.swap_partition {
+        cmd::run_best_effort("swapoff", &[swap]);
         cmd::run_with_spinner(
             "swapon",
             &[swap],

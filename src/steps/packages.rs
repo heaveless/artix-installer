@@ -77,6 +77,40 @@ pub fn ask_kernel() -> Result<KernelVariant, InstallerError> {
     Ok(kernel)
 }
 
+// ── Desktop environment ───────────────────────────────────────────────────────
+
+/// Installs kitty, Hyprland, and Neovim inside the new system via artix-chroot.
+pub fn install_desktop() -> Result<(), InstallerError> {
+    println!();
+    ui::print_kv_box(
+        "Desktop packages",
+        &[
+            ("kitty",    "GPU-accelerated terminal emulator"),
+            ("hyprland", "Wayland compositor / window manager"),
+            ("neovim",   "extensible text editor"),
+        ],
+    );
+    println!();
+
+    if !Confirm::new()
+        .with_prompt("Install desktop packages inside the new system?")
+        .default(true)
+        .interact()?
+    {
+        return Err(InstallerError::Cancelled);
+    }
+
+    println!();
+    // artix-chroot runs pacman inside /mnt — streams output interactively.
+    cmd::run_interactive(
+        "artix-chroot",
+        &["/mnt", "pacman", "-Sy", "--noconfirm", "kitty", "hyprland", "neovim"],
+    )?;
+
+    ui::print_success("Desktop packages installed.");
+    Ok(())
+}
+
 /// Installs the chosen kernel + `linux-firmware` via `basestrap`.
 pub fn install_kernel(kernel: KernelVariant) -> Result<(), InstallerError> {
     let pkg = kernel.package_name();

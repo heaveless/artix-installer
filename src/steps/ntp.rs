@@ -17,10 +17,11 @@ pub fn run() -> Result<(), InstallerError> {
         return Ok(());
     }
 
+    // -g: allow large time corrections  -q: one-shot, exit after sync
     cmd::run_with_spinner(
-        "rc-service",
-        &["ntpd", "start"],
-        "Starting ntpd and syncing clock…",
+        "ntpd",
+        &["-gq"],
+        "Syncing system clock…",
         "System clock synchronized.",
     )?;
 

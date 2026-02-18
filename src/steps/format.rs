@@ -1,76 +1,31 @@
 use console::style;
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::Confirm;
 
-use crate::{cmd, config::Config, error::InstallerError, lsblk, ui};
+use crate::{cmd, config::Config, error::InstallerError, steps::partition::part_path, ui};
 
-// ── Partition assignment ──────────────────────────────────────────────────────
+// ── Config builder ────────────────────────────────────────────────────────────
 
-/// Asks the user to assign roles to the partitions created in the previous step.
-/// Uses arrow-key selection when partition info is available from `lsblk`.
-pub fn ask_partitions(disk: &str, is_uefi: bool) -> Result<Config, InstallerError> {
-    let partitions = lsblk::list_partitions(disk);
-
-    if partitions.is_empty() {
-        ui::print_warning("No partitions detected on the disk.");
-        ui::print_warning("Make sure you wrote the partition table in cfdisk.");
-    } else {
-        ui::print_info(&format!(
-            "Detected {} partition(s) on {}. Use ↑ ↓ to assign roles.",
-            partitions.len(),
-            disk
-        ));
-    }
-
-    println!();
-
-    // ── EFI / boot ────────────────────────────────────────────────────────────
-    let efi_label = if is_uefi {
-        "EFI partition  (→ FAT32, mounted at /boot)"
-    } else {
-        "Boot partition (→ FAT32, mounted at /boot)"
-    };
-    let efi_partition = select_partition(&partitions, efi_label, &format!("{}1", disk))?;
-
-    // ── Swap (optional — last item in the list is "none") ─────────────────────
-    println!();
-    let swap_partition = select_partition_optional(
-        &partitions,
-        "Swap partition (→ mkswap)   [ select last item to skip ]",
-    )?;
-
-    // ── Root ──────────────────────────────────────────────────────────────────
-    println!();
-    let root_partition = select_partition(
-        &partitions,
-        "Root partition (→ ext4, mounted at /)",
-        &format!("{}3", disk),
-    )?;
-
+/// Derives partition roles from the disk path using the fixed layout:
+///   p1 → EFI  (FAT32)
+///   p2 → swap
+///   p3 → root (ext4)
+///
+/// Shows a summary box and asks for confirmation before returning.
+pub fn build_config(disk: &str) -> Result<Config, InstallerError> {
     let config = Config {
-        efi_partition,
-        swap_partition,
-        root_partition,
+        efi_partition:  part_path(disk, 1),
+        swap_partition: Some(part_path(disk, 2)),
+        root_partition: part_path(disk, 3),
     };
 
-    // ── Summary + confirmation ────────────────────────────────────────────────
     println!();
-    let rows: Vec<(&str, String)> = vec![
-        ("EFI/Boot", config.efi_partition.clone()),
-        (
-            "Swap",
-            config
-                .swap_partition
-                .clone()
-                .unwrap_or_else(|| "(none)".to_string()),
-        ),
-        ("Root", config.root_partition.clone()),
-    ];
     ui::print_kv_box(
         "Partition Layout",
-        &rows
-            .iter()
-            .map(|(k, v)| (*k, v.as_str()))
-            .collect::<Vec<_>>(),
+        &[
+            ("EFI  (FAT32)", config.efi_partition.as_str()),
+            ("Swap",         config.swap_partition.as_deref().unwrap()),
+            ("Root (ext4)",  config.root_partition.as_str()),
+        ],
     );
     println!();
     println!(
@@ -94,13 +49,20 @@ pub fn ask_partitions(disk: &str, is_uefi: bool) -> Result<Config, InstallerErro
 
 // ── Formatting ────────────────────────────────────────────────────────────────
 
-/// Formats each partition according to its assigned role (with spinners).
+/// Formats each partition: FAT32 (EFI), swap, ext4 (root).
 pub fn run(config: &Config) -> Result<(), InstallerError> {
+    // Unmount anything left from a previous run before formatting.
+    // umount -R /mnt covers root + EFI (/mnt/boot) in one shot.
+    cmd::run_best_effort("umount", &["-R", "/mnt"]);
+    if let Some(ref swap) = config.swap_partition {
+        cmd::run_best_effort("swapoff", &[swap]);
+    }
+
     cmd::run_with_spinner(
         "mkfs.fat",
         &["-F32", &config.efi_partition],
         &format!("Formatting {} as FAT32…", config.efi_partition),
-        &format!("{} formatted as FAT32 (EFI/boot).", config.efi_partition),
+        &format!("{} formatted as FAT32 (EFI).", config.efi_partition),
     )?;
 
     if let Some(ref swap) = config.swap_partition {
@@ -120,84 +82,4 @@ pub fn run(config: &Config) -> Result<(), InstallerError> {
     )?;
 
     Ok(())
-}
-
-// ── Selection helpers ─────────────────────────────────────────────────────────
-
-/// Arrow-key selector for a required partition role.
-/// Falls back to typed `Input` when no partition data is available.
-fn select_partition(
-    partitions: &[lsblk::Partition],
-    prompt: &str,
-    fallback_default: &str,
-) -> Result<String, InstallerError> {
-    if partitions.is_empty() {
-        return Ok(Input::new()
-            .with_prompt(prompt)
-            .default(fallback_default.to_string())
-            .interact_text()?);
-    }
-
-    print_partition_header();
-    let labels: Vec<String> = partitions.iter().map(|p| p.display()).collect();
-
-    let idx = Select::new()
-        .with_prompt(prompt)
-        .items(&labels)
-        .default(0)
-        .interact()?;
-
-    Ok(partitions[idx].path.clone())
-}
-
-/// Arrow-key selector for an optional partition role.
-/// Appends a "(none) — skip" entry at the bottom of the list.
-fn select_partition_optional(
-    partitions: &[lsblk::Partition],
-    prompt: &str,
-) -> Result<Option<String>, InstallerError> {
-    if partitions.is_empty() {
-        // No partition data — plain yes/no then typed input.
-        if !Confirm::new()
-            .with_prompt("Do you have a swap partition?")
-            .default(true)
-            .interact()?
-        {
-            return Ok(None);
-        }
-        let path: String = Input::new()
-            .with_prompt("Swap partition")
-            .default("/dev/sda2".to_string())
-            .interact_text()?;
-        return Ok(Some(path));
-    }
-
-    print_partition_header();
-
-    let mut labels: Vec<String> = partitions.iter().map(|p| p.display()).collect();
-    let none_idx = labels.len();
-    labels.push(format!("{}", style("(none)  — no swap partition").dim().italic()));
-
-    let idx = Select::new()
-        .with_prompt(prompt)
-        .items(&labels)
-        .default(none_idx) // safest default: no swap
-        .interact()?;
-
-    if idx == none_idx {
-        Ok(None)
-    } else {
-        Ok(Some(partitions[idx].path.clone()))
-    }
-}
-
-/// Prints the column-header row above a partition selector.
-fn print_partition_header() {
-    println!(
-        "  {:<12}  {:>8}   {}",
-        style("PARTITION").dim(),
-        style("SIZE").dim(),
-        style("TYPE").dim()
-    );
-    println!("  {}", style("─".repeat(44)).dim());
 }
